@@ -200,10 +200,10 @@ func runCapture(ctx context.Context, name string, args []string) string {
 
 // parseHelp はヘルプ本文から「フラグ -> 説明」を抜き出す。
 //
-//	  -n, --dry-run         do not actually do it
-//	      --no-ff           create a merge commit even when fast-forward
-//	  -f, --force
-//	                        long description on the next line
+//	-n, --dry-run         do not actually do it
+//	    --no-ff           create a merge commit even when fast-forward
+//	-f, --force
+//	                      long description on the next line
 func parseHelp(help string) map[string]string {
 	defs := map[string]string{}
 	lines := strings.Split(strings.ReplaceAll(help, "\t", "    "), "\n")
