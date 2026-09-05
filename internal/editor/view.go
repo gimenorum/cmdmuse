@@ -27,6 +27,10 @@ var (
 	stErrTxt = lipgloss.NewStyle().Foreground(colErr)
 	stOK     = lipgloss.NewStyle().Foreground(colAccent)
 	stFlag   = lipgloss.NewStyle().Foreground(colAccent)
+
+	// 提案の2状態。薄い方は未確定、濃い方は Tab で仮確定したもの。
+	stGhost     = lipgloss.NewStyle().Foreground(colFaint)
+	stGhostHeld = lipgloss.NewStyle().Foreground(colText).Bold(true)
 )
 
 func (m Model) View() string {
@@ -40,6 +44,14 @@ func (m Model) View() string {
 
 	var b strings.Builder
 	b.WriteString(m.input.View())
+	// 提案はカーソルの先に続けて描く。薄い色は未確定、白は Tab で仮確定した状態。
+	if m.ghost != "" {
+		if m.ghostHeld {
+			b.WriteString(stGhostHeld.Render(m.ghost))
+		} else {
+			b.WriteString(stGhost.Render(m.ghost))
+		}
+	}
 
 	if m.err != nil {
 		b.WriteString("\n" + stErrTxt.Render("  ✗ "+m.err.Error()))
@@ -57,7 +69,7 @@ func (m Model) View() string {
 	if m.asking {
 		b.WriteString("\n" + m.ask.View())
 	}
-	if len(m.cands) > 0 || m.asking {
+	if len(m.cands) > 0 || m.asking || m.ghostHeld {
 		b.WriteString("\n" + m.viewHelp())
 	}
 	return b.String()
@@ -178,6 +190,9 @@ func max(a, b int) int {
 func (m Model) viewHelp() string {
 	if m.asking {
 		return stFaint.Render("  Enter 質問   Esc 取消")
+	}
+	if m.ghostHeld {
+		return stFaint.Render("  Enter 取り込む   Esc 取消")
 	}
 	return stFaint.Render("  Tab 候補   1-9 選択   Ctrl+O 深堀り   Enter 実行   Esc 元に戻す")
 }

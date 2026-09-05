@@ -70,6 +70,12 @@ type Model struct {
 	// 一度で決まらなかったことを見せるためだけに持ち、選択はさせない。
 	comps []string
 
+	// ghost はカーソルの先に薄く出す補完の提案。行には入っていない。
+	// ghostHeld は Tab で仮確定した状態で、白く出すが行にはまだ入れない。
+	// Enter を押して初めて行に取り込む。
+	ghost     string
+	ghostHeld bool
+
 	cancel context.CancelFunc
 	width  int
 
@@ -368,6 +374,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyEnter:
+		// Tab で仮確定した提案があるなら、まず行に取り込む。実行はしない。
+		if m.ghostHeld && m.ghost != "" {
+			m.input.SetValue(m.input.Value() + m.ghost)
+			m.input.CursorEnd()
+			m.ghost, m.ghostHeld = "", false
+			m = m.refreshGhost()
+			return m, nil
+		}
 		line := strings.TrimSpace(m.input.Value())
 		// 未展開の AI(...) をシェルに渡すと「そんなコマンドは無い」で終わる。
 		// 待たずに済むよう、その場で展開を始める。
@@ -379,6 +393,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case tea.KeyEsc:
+		// 仮確定を取り消して薄い提案に戻す。
+		if m.ghostHeld {
+			m.ghostHeld = false
+			return m, nil
+		}
 		// 候補が出ているなら取り消して AI(...) の行に戻す。
 		if len(m.cands) > 0 || m.loading {
 			m.input.SetValue(m.prefix + "AI(" + m.goalOrSpan() + ")" + m.suffix)
@@ -400,6 +419,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyTab:
 		if len(m.cands) > 0 {
 			return m.moveCandidate(1)
+		}
+		// 提案が出ていれば、まず仮確定して白くする。行にはまだ入れない。
+		if m.ghost != "" && !m.ghostHeld {
+			m.ghostHeld = true
+			m.comps = nil
+			return m, nil
 		}
 		return m.completeWord()
 
@@ -438,6 +463,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// 行が変わったら候補も補完一覧も無効。世代を進めてタイマーを仕掛け直す。
 	m.comps = nil
+	m = m.refreshGhost()
 	if len(m.cands) > 0 || m.loading {
 		m.clearCandidates()
 	}
@@ -543,4 +569,36 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// refreshGhost はカーソルの先に出す提案を計算し直す。
+//
+// カーソルが行末にないときは出さない。途中に差し込むと、消したいのか
+// 続けたいのかが読めず邪魔になるため。zsh-autosuggestions も同じ扱い。
+func (m Model) refreshGhost() Model {
+	m.ghost, m.ghostHeld = "", false
+
+	line := m.input.Value()
+	if line == "" || m.input.Position() != len([]rune(line)) {
+		return m
+	}
+	// AI(...) を書いている最中は展開の対象なので、補完で邪魔しない。
+	if expand.HasMarker(line) {
+		return m
+	}
+
+	r := complete.Complete(line, len(line))
+	if len(r.Candidates) == 0 {
+		return m
+	}
+	word := line[r.Start:]
+	insert := r.Candidates[0]
+	if len(r.Candidates) > 1 {
+		insert = complete.CommonPrefix(r.Candidates)
+	}
+	if !strings.HasPrefix(insert, word) || len(insert) <= len(word) {
+		return m
+	}
+	m.ghost = insert[len(word):]
+	return m
 }
