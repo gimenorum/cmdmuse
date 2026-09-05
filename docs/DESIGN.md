@@ -316,6 +316,7 @@ cmdmuse の中には、モデルが書いた文字列が3系統ある。扱い�
 | R7 | `Ctrl+D` が「行が空のとき終了」であることを、起動メッセージと `--help` が書いていない | 低 | [#3](https://github.com/gimenorum/cmdmuse/issues/3) |
 | R8 | プロンプトに作業ディレクトリが出ない | 低 | [#5](https://github.com/gimenorum/cmdmuse/issues/5) |
 | R9 | `PATH` の項目が多い環境で走査に数秒かかる (WSL から Windows 側の `PATH` を継承した場合など) | 低 | 起動時の先読みで隠している。走査そのものは速くなっていない |
+| R10 | probe が実行されなかった候補が、検証に通った候補と同じ `✓` で表示される。未検証と検証済みを利用者が区別できない | 中 | [#8](https://github.com/gimenorum/cmdmuse/issues/8) |
 
 ---
 
