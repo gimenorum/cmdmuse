@@ -449,6 +449,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.cands) > 0 {
 			return m.moveCandidate(-1)
 		}
+		// 一覧はグリッドなので、上下は1行ぶん動かす。
+		if m.compOn {
+			return m.moveCompletionRow(-1)
+		}
 		if v, ok := m.history.Prev(); ok {
 			m.input.SetValue(v)
 			m.input.CursorEnd()
@@ -459,11 +463,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.cands) > 0 {
 			return m.moveCandidate(1)
 		}
+		if m.compOn {
+			return m.moveCompletionRow(1)
+		}
 		if v, ok := m.history.Next(); ok {
 			m.input.SetValue(v)
 			m.input.CursorEnd()
 		}
 		return m, nil
+
+	case tea.KeyLeft:
+		if m.compOn {
+			return m.cycleCompletion(-1)
+		}
+
+	case tea.KeyRight:
+		if m.compOn {
+			return m.cycleCompletion(1)
+		}
 	}
 
 	before := m.input.Value()
@@ -649,4 +666,22 @@ func suggestFor(line string) string {
 		return ""
 	}
 	return insert[len(word):]
+}
+
+// moveCompletionRow は一覧のグリッドを1行ぶん上下に動かす。
+//
+// 左右が1件ずつ動くのに対し、上下は見た目の行に合わせる。
+// 端は回り込ませず止める。グリッドで縦に回り込むと今どこにいるか分からなくなる。
+func (m Model) moveCompletionRow(d int) (tea.Model, tea.Cmd) {
+	if !m.compOn || len(m.comps) == 0 {
+		return m, nil
+	}
+	cols := gridCols(m.comps, m.width)
+	next := m.compCur + d*cols
+	if next < 0 || next >= len(m.comps) {
+		return m, nil
+	}
+	m.compCur = next
+	m.ghost = m.selectedSuffix()
+	return m, nil
 }

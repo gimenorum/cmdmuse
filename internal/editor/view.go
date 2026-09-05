@@ -169,14 +169,8 @@ func (m Model) viewCompletions(w int) string {
 		offset = 0
 	}
 
-	colW := 0
-	for _, c := range shown {
-		if n := lipgloss.Width(c); n > colW {
-			colW = n
-		}
-	}
-	colW += 3
-	cols := max(1, (w-2)/colW)
+	colW := gridColWidth(shown)
+	cols := gridCols(shown, w)
 
 	var b strings.Builder
 	for i, c := range shown {
@@ -204,6 +198,22 @@ func (m Model) viewCompletions(w int) string {
 	return strings.TrimRight(b.String(), " ")
 }
 
+// gridColWidth と gridCols は一覧の並びを決める。
+// 矢印キーで1行ぶん動くために、モデル側からも同じ計算を使う。
+func gridColWidth(items []string) int {
+	w := 0
+	for _, c := range items {
+		if n := lipgloss.Width(c); n > w {
+			w = n
+		}
+	}
+	return w + 3
+}
+
+func gridCols(items []string, width int) int {
+	return max(1, (width-2)/gridColWidth(items))
+}
+
 func max(a, b int) int {
 	if a > b {
 		return a
@@ -216,7 +226,7 @@ func (m Model) viewHelp() string {
 		return stFaint.Render("  Enter 質問   Esc 取消")
 	}
 	if m.compOn {
-		return stFaint.Render(fmt.Sprintf("  %d/%d   Tab 次へ   Shift+Tab 前へ   Enter 取り込む   Esc 取消",
+		return stFaint.Render(fmt.Sprintf("  %d/%d   ←→/Tab 選択   ↑↓ 行移動   Enter 取り込む   Esc 取消",
 			m.compCur+1, len(m.comps)))
 	}
 	return stFaint.Render("  Tab 候補   1-9 選択   Ctrl+O 深堀り   Enter 実行   Esc 元に戻す")
