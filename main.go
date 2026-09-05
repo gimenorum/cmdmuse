@@ -22,6 +22,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/term"
 
+	"github.com/gimenorum/cmdmuse/internal/complete"
 	"github.com/gimenorum/cmdmuse/internal/core"
 	"github.com/gimenorum/cmdmuse/internal/editor"
 	"github.com/gimenorum/cmdmuse/internal/llm"
@@ -50,6 +51,10 @@ func main() {
 	sctx, scancel := context.WithTimeout(context.Background(), 8*time.Second)
 	sess := session.Capture(sctx)
 	scancel()
+
+	// PATH の走査を先に始めておく。WSL では数秒かかり、
+	// 最初の打鍵で踏むと入力が固まる。
+	complete.WarmPathCache()
 
 	hist := editor.LoadHistory()
 	defer hist.Save()
@@ -187,11 +192,12 @@ func usage() {
   CMDMUSE_MODEL      モデル名 (未指定なら /models の先頭)
 
 キー:
-  Tab, ↑↓            候補を切り替える (行がその場で差し替わる)
+  Tab, ←→            候補を選ぶ (AI(...) の候補も補完の候補も)
+  ↑↓                 補完一覧では1行ぶん移動 / 候補が無ければ履歴
   1-9                候補を直接選ぶ
   Ctrl+O             選択中の候補について追加で質問する
-  Enter              行を実行する
-  Esc                展開を取り消して AI(...) に戻す
+  Enter              提案を取り込む / 未展開の AI(...) を展開 / それ以外は実行
+  Esc                提案の仮確定を取り消す / 展開を取り消して AI(...) に戻す
   ↑↓                 (候補が無いとき) 履歴をたどる
   Ctrl+D, exit       終了
 

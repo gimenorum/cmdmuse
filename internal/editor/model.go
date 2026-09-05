@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/gimenorum/cmdmuse/internal/complete"
 	"github.com/gimenorum/cmdmuse/internal/core"
 	"github.com/gimenorum/cmdmuse/internal/expand"
 	"github.com/gimenorum/cmdmuse/internal/llm"
@@ -64,6 +65,18 @@ type Model struct {
 
 	asking bool // 深堀りの質問を入力中
 	ask    textinput.Model
+
+	// 補完の候補一覧と、いま選んでいるもの。
+	// Tab を押すたびに compCur が進み、選択中の候補が ghost として出る。
+	comps     []string
+	compCur   int
+	compStart int // 置き換える範囲 (バイト)
+	compEnd   int
+	compOn    bool // Tab で一覧を開いて選択している最中
+
+	// ghost はカーソルの先に出す補完の提案。行にはまだ入っていない。
+	// compOn なら選択中の候補を白く、そうでなければ共通接頭辞を薄く出す。
+	ghost string
 
 	cancel context.CancelFunc
 	width  int
@@ -121,6 +134,15 @@ type explainMsg struct {
 	strategy string
 	text     string
 	err      error
+}
+
+// ghostMsg は非同期に計算した提案。
+// 補完はファイルシステムを触るので、遅いパスを踏んでも
+// 打鍵が止まらないよう Update ループの外で計算する。
+type ghostMsg struct {
+	seq  int
+	line string
+	text string
 }
 
 func idleCmd(seq int) tea.Cmd {
@@ -263,6 +285,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.explaining = true
 		return m, m.explainCmd(m.cands[m.cur], m.cands)
 
+	case ghostMsg:
+		// 打鍵が進んでいたら古い計算結果。捨てる。
+		if msg.seq != m.seq || m.compOn || m.input.Value() != msg.line {
+			return m, nil
+		}
+		m.ghost = msg.text
+		return m, nil
+
 	case explainMsg:
 		m.explaining = false
 		for i := range m.cands {
@@ -363,6 +393,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyEnter:
+		// 選択中の候補があるなら、まず行に取り込む。実行はしない。
+		if m.compOn && len(m.comps) > 0 {
+			return m.commitCompletion()
+		}
 		line := strings.TrimSpace(m.input.Value())
 		// 未展開の AI(...) をシェルに渡すと「そんなコマンドは無い」で終わる。
 		// 待たずに済むよう、その場で展開を始める。
@@ -374,6 +408,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case tea.KeyEsc:
+		// 候補の選択を取り消して、薄い提案に戻す。
+		if m.compOn {
+			m.closeCompletion()
+			return m, m.refreshGhost()
+		}
 		// 候補が出ているなら取り消して AI(...) の行に戻す。
 		if len(m.cands) > 0 || m.loading {
 			m.input.SetValue(m.prefix + "AI(" + m.goalOrSpan() + ")" + m.suffix)
@@ -396,15 +435,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.cands) > 0 {
 			return m.moveCandidate(1)
 		}
+		return m.cycleCompletion(1)
 
 	case tea.KeyShiftTab:
 		if len(m.cands) > 0 {
 			return m.moveCandidate(-1)
 		}
+		if m.compOn {
+			return m.cycleCompletion(-1)
+		}
 
 	case tea.KeyUp:
 		if len(m.cands) > 0 {
 			return m.moveCandidate(-1)
+		}
+		// 一覧はグリッドなので、上下は1行ぶん動かす。
+		if m.compOn {
+			return m.moveCompletionRow(-1)
 		}
 		if v, ok := m.history.Prev(); ok {
 			m.input.SetValue(v)
@@ -416,11 +463,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.cands) > 0 {
 			return m.moveCandidate(1)
 		}
+		if m.compOn {
+			return m.moveCompletionRow(1)
+		}
 		if v, ok := m.history.Next(); ok {
 			m.input.SetValue(v)
 			m.input.CursorEnd()
 		}
 		return m, nil
+
+	case tea.KeyLeft:
+		if m.compOn {
+			return m.cycleCompletion(-1)
+		}
+
+	case tea.KeyRight:
+		if m.compOn {
+			return m.cycleCompletion(1)
+		}
 	}
 
 	before := m.input.Value()
@@ -430,15 +490,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// 行が変わったら候補は無効。世代を進めてタイマーを仕掛け直す。
+	// 行が変わったら候補も補完一覧も無効。世代を進めてタイマーを仕掛け直す。
+	m.closeCompletion()
 	if len(m.cands) > 0 || m.loading {
 		m.clearCandidates()
 	}
 	m.seq++
+	// seq を進めてから仕掛ける。古い結果を捨てる判定に使う。
+	ghostCmd := m.refreshGhost()
 	if expand.HasMarker(m.input.Value()) {
-		return m, tea.Batch(cmd, idleCmd(m.seq))
+		return m, tea.Batch(cmd, ghostCmd, idleCmd(m.seq))
 	}
-	return m, cmd
+	return m, tea.Batch(cmd, ghostCmd)
 }
 
 func (m Model) goalOrSpan() string {
@@ -488,4 +551,137 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// ---- 補完 ----
+
+// cycleCompletion は Tab / Shift+Tab で候補を送る。
+//
+// 初回の Tab で候補を集めて先頭を選び、以降は選択が動く。
+// AI(...) の候補が Tab で切り替わるのと同じ操作感になるよう揃えてある。
+func (m Model) cycleCompletion(d int) (tea.Model, tea.Cmd) {
+	if !m.compOn {
+		line := m.input.Value()
+		r := complete.Complete(line, m.bytePos())
+		if len(r.Candidates) == 0 {
+			return m, nil
+		}
+		m.comps = r.Candidates
+		m.compStart, m.compEnd = r.Start, r.End
+		m.compCur = 0
+		m.compOn = true
+	} else {
+		m.compCur = (m.compCur + d + len(m.comps)) % len(m.comps)
+	}
+	m.ghost = m.selectedSuffix()
+	return m, nil
+}
+
+// commitCompletion は選択中の候補を行に取り込む。実行はしない。
+func (m Model) commitCompletion() (tea.Model, tea.Cmd) {
+	line := m.input.Value()
+	pick := m.comps[m.compCur]
+	// ディレクトリはそのまま潜れるよう空白を足さない。
+	if !strings.HasSuffix(pick, "/") {
+		pick += " "
+	}
+	newLine := line[:m.compStart] + pick + line[m.compEnd:]
+	m.input.SetValue(newLine)
+	m.input.SetCursor(len([]rune(line[:m.compStart] + pick)))
+	m.closeCompletion()
+	return m, m.refreshGhost()
+}
+
+func (m *Model) closeCompletion() {
+	m.comps = nil
+	m.compCur = 0
+	m.compOn = false
+	m.ghost = ""
+}
+
+// selectedSuffix は選択中の候補のうち、まだ打っていない部分を返す。
+func (m Model) selectedSuffix() string {
+	if len(m.comps) == 0 {
+		return ""
+	}
+	pick := m.comps[m.compCur]
+	word := m.input.Value()[m.compStart:m.compEnd]
+	if !strings.HasPrefix(pick, word) {
+		return pick
+	}
+	return pick[len(word):]
+}
+
+// bytePos は textinput のルーン単位のカーソル位置をバイト位置に直す。
+func (m Model) bytePos() int {
+	r := []rune(m.input.Value())
+	p := m.input.Position()
+	if p > len(r) {
+		p = len(r)
+	}
+	return len(string(r[:p]))
+}
+
+// refreshGhost は提案を消して、計算し直す Cmd を返す。
+//
+// 補完はファイルシステムを触る。WSL の PATH には Windows 側が数十個
+// 入っていて ReadDir に数秒かかることがあり、Update の中で待つと
+// その間の打鍵が固まって溜まる。計算は別 goroutine に出す。
+//
+// カーソルが行末にないときは出さない。途中に差し込むと、消したいのか
+// 続けたいのかが読めず邪魔になるため。zsh-autosuggestions も同じ扱い。
+func (m *Model) refreshGhost() tea.Cmd {
+	if m.compOn {
+		return nil
+	}
+	m.ghost = ""
+
+	line := m.input.Value()
+	if line == "" || m.input.Position() != len([]rune(line)) {
+		return nil
+	}
+	// AI(...) を書いている最中は展開の対象なので、補完で邪魔しない。
+	if expand.HasMarker(line) {
+		return nil
+	}
+
+	seq := m.seq
+	return func() tea.Msg {
+		return ghostMsg{seq: seq, line: line, text: suggestFor(line)}
+	}
+}
+
+// suggestFor は行に対する提案を返す。呼び出しはブロックする。
+func suggestFor(line string) string {
+	r := complete.Complete(line, len(line))
+	if len(r.Candidates) == 0 {
+		return ""
+	}
+	word := line[r.Start:]
+	insert := r.Candidates[0]
+	if len(r.Candidates) > 1 {
+		insert = complete.CommonPrefix(r.Candidates)
+	}
+	if !strings.HasPrefix(insert, word) || len(insert) <= len(word) {
+		return ""
+	}
+	return insert[len(word):]
+}
+
+// moveCompletionRow は一覧のグリッドを1行ぶん上下に動かす。
+//
+// 左右が1件ずつ動くのに対し、上下は見た目の行に合わせる。
+// 端は回り込ませず止める。グリッドで縦に回り込むと今どこにいるか分からなくなる。
+func (m Model) moveCompletionRow(d int) (tea.Model, tea.Cmd) {
+	if !m.compOn || len(m.comps) == 0 {
+		return m, nil
+	}
+	cols := gridCols(m.comps, m.width)
+	next := m.compCur + d*cols
+	if next < 0 || next >= len(m.comps) {
+		return m, nil
+	}
+	m.compCur = next
+	m.ghost = m.selectedSuffix()
+	return m, nil
 }
