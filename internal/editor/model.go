@@ -136,6 +136,15 @@ type explainMsg struct {
 	err      error
 }
 
+// ghostMsg は非同期に計算した提案。
+// 補完はファイルシステムを触るので、遅いパスを踏んでも
+// 打鍵が止まらないよう Update ループの外で計算する。
+type ghostMsg struct {
+	seq  int
+	line string
+	text string
+}
+
 func idleCmd(seq int) tea.Cmd {
 	return tea.Tick(IdleDelay, func(time.Time) tea.Msg { return idleMsg{seq} })
 }
@@ -276,6 +285,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.explaining = true
 		return m, m.explainCmd(m.cands[m.cur], m.cands)
 
+	case ghostMsg:
+		// 打鍵が進んでいたら古い計算結果。捨てる。
+		if msg.seq != m.seq || m.compOn || m.input.Value() != msg.line {
+			return m, nil
+		}
+		m.ghost = msg.text
+		return m, nil
+
 	case explainMsg:
 		m.explaining = false
 		for i := range m.cands {
@@ -394,8 +411,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// 候補の選択を取り消して、薄い提案に戻す。
 		if m.compOn {
 			m.closeCompletion()
-			m = m.refreshGhost()
-			return m, nil
+			return m, m.refreshGhost()
 		}
 		// 候補が出ているなら取り消して AI(...) の行に戻す。
 		if len(m.cands) > 0 || m.loading {
@@ -459,15 +475,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// 行が変わったら候補も補完一覧も無効。世代を進めてタイマーを仕掛け直す。
 	m.closeCompletion()
-	m = m.refreshGhost()
 	if len(m.cands) > 0 || m.loading {
 		m.clearCandidates()
 	}
 	m.seq++
+	// seq を進めてから仕掛ける。古い結果を捨てる判定に使う。
+	ghostCmd := m.refreshGhost()
 	if expand.HasMarker(m.input.Value()) {
-		return m, tea.Batch(cmd, idleCmd(m.seq))
+		return m, tea.Batch(cmd, ghostCmd, idleCmd(m.seq))
 	}
-	return m, cmd
+	return m, tea.Batch(cmd, ghostCmd)
 }
 
 func (m Model) goalOrSpan() string {
@@ -555,7 +572,7 @@ func (m Model) commitCompletion() (tea.Model, tea.Cmd) {
 	m.input.SetValue(newLine)
 	m.input.SetCursor(len([]rune(line[:m.compStart] + pick)))
 	m.closeCompletion()
-	return m.refreshGhost(), nil
+	return m, m.refreshGhost()
 }
 
 func (m *Model) closeCompletion() {
@@ -588,28 +605,40 @@ func (m Model) bytePos() int {
 	return len(string(r[:p]))
 }
 
-// refreshGhost は Tab を押す前の薄い提案を計算する。
+// refreshGhost は提案を消して、計算し直す Cmd を返す。
+//
+// 補完はファイルシステムを触る。WSL の PATH には Windows 側が数十個
+// 入っていて ReadDir に数秒かかることがあり、Update の中で待つと
+// その間の打鍵が固まって溜まる。計算は別 goroutine に出す。
 //
 // カーソルが行末にないときは出さない。途中に差し込むと、消したいのか
 // 続けたいのかが読めず邪魔になるため。zsh-autosuggestions も同じ扱い。
-func (m Model) refreshGhost() Model {
+func (m *Model) refreshGhost() tea.Cmd {
 	if m.compOn {
-		return m
+		return nil
 	}
 	m.ghost = ""
 
 	line := m.input.Value()
 	if line == "" || m.input.Position() != len([]rune(line)) {
-		return m
+		return nil
 	}
 	// AI(...) を書いている最中は展開の対象なので、補完で邪魔しない。
 	if expand.HasMarker(line) {
-		return m
+		return nil
 	}
 
+	seq := m.seq
+	return func() tea.Msg {
+		return ghostMsg{seq: seq, line: line, text: suggestFor(line)}
+	}
+}
+
+// suggestFor は行に対する提案を返す。呼び出しはブロックする。
+func suggestFor(line string) string {
 	r := complete.Complete(line, len(line))
 	if len(r.Candidates) == 0 {
-		return m
+		return ""
 	}
 	word := line[r.Start:]
 	insert := r.Candidates[0]
@@ -617,8 +646,7 @@ func (m Model) refreshGhost() Model {
 		insert = complete.CommonPrefix(r.Candidates)
 	}
 	if !strings.HasPrefix(insert, word) || len(insert) <= len(word) {
-		return m
+		return ""
 	}
-	m.ghost = insert[len(word):]
-	return m
+	return insert[len(word):]
 }

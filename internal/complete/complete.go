@@ -96,6 +96,16 @@ func InvalidatePathCache() {
 	pathCache.names = nil
 }
 
+// WarmPathCache は PATH の走査を先に済ませておく。
+//
+// WSL では PATH に Windows 側 (/mnt/c/...) が数十個入っていて、
+// 9p 越しの ReadDir に実測 5.5 秒かかる。打鍵の途中でこれを踏むと
+// その間の入力が固まって溜まり、終わった瞬間に一気に流れ込む。
+// 起動直後に別 goroutine で走らせて、最初の打鍵までに終わらせる。
+func WarmPathCache() {
+	go executables()
+}
+
 func executables() []string {
 	pathCache.once.Do(func() {
 		seen := map[string]bool{}

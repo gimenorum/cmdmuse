@@ -22,6 +22,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/term"
 
+	"github.com/gimenorum/cmdmuse/internal/complete"
 	"github.com/gimenorum/cmdmuse/internal/core"
 	"github.com/gimenorum/cmdmuse/internal/editor"
 	"github.com/gimenorum/cmdmuse/internal/llm"
@@ -50,6 +51,10 @@ func main() {
 	sctx, scancel := context.WithTimeout(context.Background(), 8*time.Second)
 	sess := session.Capture(sctx)
 	scancel()
+
+	// PATH の走査を先に始めておく。WSL では数秒かかり、
+	// 最初の打鍵で踏むと入力が固まる。
+	complete.WarmPathCache()
 
 	hist := editor.LoadHistory()
 	defer hist.Save()
