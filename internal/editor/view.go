@@ -46,7 +46,7 @@ func (m Model) View() string {
 	b.WriteString(m.input.View())
 	// 提案はカーソルの先に続けて描く。薄い色は未確定、白は Tab で仮確定した状態。
 	if m.ghost != "" {
-		if m.ghostHeld {
+		if m.compOn {
 			b.WriteString(stGhostHeld.Render(m.ghost))
 		} else {
 			b.WriteString(stGhost.Render(m.ghost))
@@ -69,7 +69,7 @@ func (m Model) View() string {
 	if m.asking {
 		b.WriteString("\n" + m.ask.View())
 	}
-	if len(m.cands) > 0 || m.asking || m.ghostHeld {
+	if len(m.cands) > 0 || m.asking || m.compOn {
 		b.WriteString("\n" + m.viewHelp())
 	}
 	return b.String()
@@ -155,13 +155,27 @@ func (m Model) viewCompletions(w int) string {
 		shown = shown[:maxShown]
 	}
 
+	// 選択中が画面外に出ないよう、その周辺を映す。
+	if m.compCur >= maxShown {
+		from := m.compCur - maxShown + 1
+		shown = m.comps[from:]
+		if len(shown) > maxShown {
+			shown = shown[:maxShown]
+		}
+		rest = 0
+	}
+	offset := len(m.comps) - len(shown)
+	if m.compCur < maxShown {
+		offset = 0
+	}
+
 	colW := 0
 	for _, c := range shown {
 		if n := lipgloss.Width(c); n > colW {
 			colW = n
 		}
 	}
-	colW += 2
+	colW += 3
 	cols := max(1, (w-2)/colW)
 
 	var b strings.Builder
@@ -170,9 +184,19 @@ func (m Model) viewCompletions(w int) string {
 			b.WriteString("\n")
 		}
 		if i%cols == 0 {
-			b.WriteString("  ")
+			b.WriteString(" ")
 		}
-		b.WriteString(stDim.Render(c + strings.Repeat(" ", colW-lipgloss.Width(c))))
+		mark := "  "
+		style := stDim
+		if offset+i == m.compCur {
+			mark = "▸ "
+			style = stSel
+		}
+		pad := colW - lipgloss.Width(c) - 2
+		if pad < 1 {
+			pad = 1
+		}
+		b.WriteString(mark + style.Render(c) + strings.Repeat(" ", pad))
 	}
 	if rest > 0 {
 		b.WriteString(stFaint.Render(fmt.Sprintf("\n  ...他 %d 件", rest)))
@@ -191,8 +215,9 @@ func (m Model) viewHelp() string {
 	if m.asking {
 		return stFaint.Render("  Enter 質問   Esc 取消")
 	}
-	if m.ghostHeld {
-		return stFaint.Render("  Enter 取り込む   Esc 取消")
+	if m.compOn {
+		return stFaint.Render(fmt.Sprintf("  %d/%d   Tab 次へ   Shift+Tab 前へ   Enter 取り込む   Esc 取消",
+			m.compCur+1, len(m.comps)))
 	}
 	return stFaint.Render("  Tab 候補   1-9 選択   Ctrl+O 深堀り   Enter 実行   Esc 元に戻す")
 }

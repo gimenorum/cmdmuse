@@ -66,15 +66,17 @@ type Model struct {
 	asking bool // 深堀りの質問を入力中
 	ask    textinput.Model
 
-	// comps は Tab 補完で複数候補が出たときの一覧。
-	// 一度で決まらなかったことを見せるためだけに持ち、選択はさせない。
-	comps []string
+	// 補完の候補一覧と、いま選んでいるもの。
+	// Tab を押すたびに compCur が進み、選択中の候補が ghost として出る。
+	comps     []string
+	compCur   int
+	compStart int // 置き換える範囲 (バイト)
+	compEnd   int
+	compOn    bool // Tab で一覧を開いて選択している最中
 
-	// ghost はカーソルの先に薄く出す補完の提案。行には入っていない。
-	// ghostHeld は Tab で仮確定した状態で、白く出すが行にはまだ入れない。
-	// Enter を押して初めて行に取り込む。
-	ghost     string
-	ghostHeld bool
+	// ghost はカーソルの先に出す補完の提案。行にはまだ入っていない。
+	// compOn なら選択中の候補を白く、そうでなければ共通接頭辞を薄く出す。
+	ghost string
 
 	cancel context.CancelFunc
 	width  int
@@ -374,13 +376,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyEnter:
-		// Tab で仮確定した提案があるなら、まず行に取り込む。実行はしない。
-		if m.ghostHeld && m.ghost != "" {
-			m.input.SetValue(m.input.Value() + m.ghost)
-			m.input.CursorEnd()
-			m.ghost, m.ghostHeld = "", false
-			m = m.refreshGhost()
-			return m, nil
+		// 選択中の候補があるなら、まず行に取り込む。実行はしない。
+		if m.compOn && len(m.comps) > 0 {
+			return m.commitCompletion()
 		}
 		line := strings.TrimSpace(m.input.Value())
 		// 未展開の AI(...) をシェルに渡すと「そんなコマンドは無い」で終わる。
@@ -393,9 +391,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case tea.KeyEsc:
-		// 仮確定を取り消して薄い提案に戻す。
-		if m.ghostHeld {
-			m.ghostHeld = false
+		// 候補の選択を取り消して、薄い提案に戻す。
+		if m.compOn {
+			m.closeCompletion()
+			m = m.refreshGhost()
 			return m, nil
 		}
 		// 候補が出ているなら取り消して AI(...) の行に戻す。
@@ -420,17 +419,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.cands) > 0 {
 			return m.moveCandidate(1)
 		}
-		// 提案が出ていれば、まず仮確定して白くする。行にはまだ入れない。
-		if m.ghost != "" && !m.ghostHeld {
-			m.ghostHeld = true
-			m.comps = nil
-			return m, nil
-		}
-		return m.completeWord()
+		return m.cycleCompletion(1)
 
 	case tea.KeyShiftTab:
 		if len(m.cands) > 0 {
 			return m.moveCandidate(-1)
+		}
+		if m.compOn {
+			return m.cycleCompletion(-1)
 		}
 
 	case tea.KeyUp:
@@ -462,7 +458,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// 行が変わったら候補も補完一覧も無効。世代を進めてタイマーを仕掛け直す。
-	m.comps = nil
+	m.closeCompletion()
 	m = m.refreshGhost()
 	if len(m.cands) > 0 || m.loading {
 		m.clearCandidates()
@@ -523,60 +519,84 @@ func truncate(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// completeWord は Tab 補完を行う。
+// ---- 補完 ----
+
+// cycleCompletion は Tab / Shift+Tab で候補を送る。
 //
-// 候補が1件なら確定させ、複数なら共通接頭辞まで進める。
-// 接頭辞で進めなかったときだけ一覧を出す。毎回一覧を出すと画面が忙しい。
-func (m Model) completeWord() (tea.Model, tea.Cmd) {
-	line := m.input.Value()
-	pos := m.input.Position()
-	// textinput の位置はルーン単位なのでバイト位置に直す。
-	bytePos := len(string([]rune(line)[:min(pos, len([]rune(line)))]))
-
-	r := complete.Complete(line, bytePos)
-	if len(r.Candidates) == 0 {
-		m.comps = nil
-		return m, nil
-	}
-
-	word := line[r.Start:r.End]
-	insert := r.Candidates[0]
-	if len(r.Candidates) > 1 {
-		insert = complete.CommonPrefix(r.Candidates)
-	}
-
-	// 進めないなら一覧を見せる。bash と同じく、一度目の Tab で進めるところまで進め、
-	// それ以上進まない二度目の Tab で一覧を出す。
-	if insert == word || insert == "" {
+// 初回の Tab で候補を集めて先頭を選び、以降は選択が動く。
+// AI(...) の候補が Tab で切り替わるのと同じ操作感になるよう揃えてある。
+func (m Model) cycleCompletion(d int) (tea.Model, tea.Cmd) {
+	if !m.compOn {
+		line := m.input.Value()
+		r := complete.Complete(line, m.bytePos())
+		if len(r.Candidates) == 0 {
+			return m, nil
+		}
 		m.comps = r.Candidates
-		return m, nil
+		m.compStart, m.compEnd = r.Start, r.End
+		m.compCur = 0
+		m.compOn = true
+	} else {
+		m.compCur = (m.compCur + d + len(m.comps)) % len(m.comps)
 	}
-
-	// 1件に決まったときだけ空白を足して次の語へ進ませる。
-	// ディレクトリは末尾が / なので、そのまま潜れるように空白は足さない。
-	if len(r.Candidates) == 1 && !strings.HasSuffix(insert, "/") {
-		insert += " "
-	}
-	m.comps = nil
-	newLine := line[:r.Start] + insert + line[r.End:]
-	m.input.SetValue(newLine)
-	m.input.SetCursor(len([]rune(line[:r.Start] + insert)))
+	m.ghost = m.selectedSuffix()
 	return m, nil
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+// commitCompletion は選択中の候補を行に取り込む。実行はしない。
+func (m Model) commitCompletion() (tea.Model, tea.Cmd) {
+	line := m.input.Value()
+	pick := m.comps[m.compCur]
+	// ディレクトリはそのまま潜れるよう空白を足さない。
+	if !strings.HasSuffix(pick, "/") {
+		pick += " "
 	}
-	return b
+	newLine := line[:m.compStart] + pick + line[m.compEnd:]
+	m.input.SetValue(newLine)
+	m.input.SetCursor(len([]rune(line[:m.compStart] + pick)))
+	m.closeCompletion()
+	return m.refreshGhost(), nil
 }
 
-// refreshGhost はカーソルの先に出す提案を計算し直す。
+func (m *Model) closeCompletion() {
+	m.comps = nil
+	m.compCur = 0
+	m.compOn = false
+	m.ghost = ""
+}
+
+// selectedSuffix は選択中の候補のうち、まだ打っていない部分を返す。
+func (m Model) selectedSuffix() string {
+	if len(m.comps) == 0 {
+		return ""
+	}
+	pick := m.comps[m.compCur]
+	word := m.input.Value()[m.compStart:m.compEnd]
+	if !strings.HasPrefix(pick, word) {
+		return pick
+	}
+	return pick[len(word):]
+}
+
+// bytePos は textinput のルーン単位のカーソル位置をバイト位置に直す。
+func (m Model) bytePos() int {
+	r := []rune(m.input.Value())
+	p := m.input.Position()
+	if p > len(r) {
+		p = len(r)
+	}
+	return len(string(r[:p]))
+}
+
+// refreshGhost は Tab を押す前の薄い提案を計算する。
 //
 // カーソルが行末にないときは出さない。途中に差し込むと、消したいのか
 // 続けたいのかが読めず邪魔になるため。zsh-autosuggestions も同じ扱い。
 func (m Model) refreshGhost() Model {
-	m.ghost, m.ghostHeld = "", false
+	if m.compOn {
+		return m
+	}
+	m.ghost = ""
 
 	line := m.input.Value()
 	if line == "" || m.input.Position() != len([]rune(line)) {
