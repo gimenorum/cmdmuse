@@ -42,7 +42,7 @@ cmd> cat server.log | grep -i error | tail -20 | less
 | OpenAI 互換 API のみ | 使うのは `GET /models` と `POST /chat/completions` の2つ | ローカルのサーバーでもクラウドでも動かすため |
 | モデル固有機能を使わない | tool calling / structured output / ストリーミングは使わない | 同上 |
 | シェルを補助に使わない | 補完も probe (用語集参照) も、編集中の行や生成物をシェルに渡さない | 品質目標1 |
-| 画面を占有しない | 端末の代替画面バッファに入らない | 実行結果が通常のシェルと同じようにスクロールバックへ残る必要がある |
+| 実行結果を画面に残す | cmdmuse は端末の代替画面バッファ (vim や less が使うもの) に入らない。プロンプトも候補も実行結果も、通常の画面にそのまま書かれる | 要件 |
 | 処理内で実行するコマンドは副作用がないもの | `--help` / `man` / probe / `tmux capture-pane` | 品質目標1 |
 
 ---
