@@ -144,56 +144,59 @@ func (m Model) viewDetail(w int) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// viewCompletions は Tab で決まりきらなかった候補を並べる。
-// 端末を埋め尽くさないよう件数を絞り、残りは数だけ伝える。
+// viewCompletions は候補をグリッドに並べ、選択中を強調する。
+//
+// 端末を埋め尽くさないよう表示は maxRows 行までとし、選択が外に出たら
+// 行単位でスクロールする。列をずらすと候補の位置が毎回動いて追えなくなるため、
+// 切り出しは必ず行の頭で行う。
 func (m Model) viewCompletions(w int) string {
-	const maxShown = 24
-	shown := m.comps
-	rest := 0
-	if len(shown) > maxShown {
-		rest = len(shown) - maxShown
-		shown = shown[:maxShown]
+	const maxRows = 8
+
+	cols := gridCols(m.comps, w)
+	colW := gridColWidth(m.comps)
+	total := len(m.comps)
+	totalRows := (total + cols - 1) / cols
+
+	// 選択中の行が入るように、表示する行の範囲を決める。
+	curRow := m.compCur / cols
+	firstRow := 0
+	if curRow >= maxRows {
+		firstRow = curRow - maxRows + 1
+	}
+	if firstRow > totalRows-maxRows {
+		firstRow = totalRows - maxRows
+	}
+	if firstRow < 0 {
+		firstRow = 0
 	}
 
-	// 選択中が画面外に出ないよう、その周辺を映す。
-	if m.compCur >= maxShown {
-		from := m.compCur - maxShown + 1
-		shown = m.comps[from:]
-		if len(shown) > maxShown {
-			shown = shown[:maxShown]
-		}
-		rest = 0
+	from := firstRow * cols
+	to := from + maxRows*cols
+	if to > total {
+		to = total
 	}
-	offset := len(m.comps) - len(shown)
-	if m.compCur < maxShown {
-		offset = 0
-	}
-
-	colW := gridColWidth(shown)
-	cols := gridCols(shown, w)
 
 	var b strings.Builder
-	for i, c := range shown {
-		if i > 0 && i%cols == 0 {
+	for i := from; i < to; i++ {
+		if i > from && (i-from)%cols == 0 {
 			b.WriteString("\n")
 		}
-		if i%cols == 0 {
+		if (i-from)%cols == 0 {
 			b.WriteString(" ")
 		}
-		mark := "  "
-		style := stDim
-		if offset+i == m.compCur {
-			mark = "▸ "
-			style = stSel
+		mark, style := "  ", stDim
+		if i == m.compCur {
+			mark, style = "▸ ", stSel
 		}
-		pad := colW - lipgloss.Width(c) - 2
+		pad := colW - lipgloss.Width(m.comps[i]) - 2
 		if pad < 1 {
 			pad = 1
 		}
-		b.WriteString(mark + style.Render(c) + strings.Repeat(" ", pad))
+		b.WriteString(mark + style.Render(m.comps[i]) + strings.Repeat(" ", pad))
 	}
-	if rest > 0 {
-		b.WriteString(stFaint.Render(fmt.Sprintf("\n  ...他 %d 件", rest)))
+
+	if hidden := total - (to - from); hidden > 0 {
+		b.WriteString(stFaint.Render(fmt.Sprintf("\n  ...他 %d 件", hidden)))
 	}
 	return strings.TrimRight(b.String(), " ")
 }
