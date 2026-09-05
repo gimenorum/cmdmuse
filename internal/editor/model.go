@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/gimenorum/cmdmuse/internal/complete"
 	"github.com/gimenorum/cmdmuse/internal/core"
 	"github.com/gimenorum/cmdmuse/internal/expand"
 	"github.com/gimenorum/cmdmuse/internal/llm"
@@ -64,6 +65,10 @@ type Model struct {
 
 	asking bool // 深堀りの質問を入力中
 	ask    textinput.Model
+
+	// comps は Tab 補完で複数候補が出たときの一覧。
+	// 一度で決まらなかったことを見せるためだけに持ち、選択はさせない。
+	comps []string
 
 	cancel context.CancelFunc
 	width  int
@@ -396,6 +401,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.cands) > 0 {
 			return m.moveCandidate(1)
 		}
+		return m.completeWord()
 
 	case tea.KeyShiftTab:
 		if len(m.cands) > 0 {
@@ -430,7 +436,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// 行が変わったら候補は無効。世代を進めてタイマーを仕掛け直す。
+	// 行が変わったら候補も補完一覧も無効。世代を進めてタイマーを仕掛け直す。
+	m.comps = nil
 	if len(m.cands) > 0 || m.loading {
 		m.clearCandidates()
 	}
@@ -488,4 +495,52 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// completeWord は Tab 補完を行う。
+//
+// 候補が1件なら確定させ、複数なら共通接頭辞まで進める。
+// 接頭辞で進めなかったときだけ一覧を出す。毎回一覧を出すと画面が忙しい。
+func (m Model) completeWord() (tea.Model, tea.Cmd) {
+	line := m.input.Value()
+	pos := m.input.Position()
+	// textinput の位置はルーン単位なのでバイト位置に直す。
+	bytePos := len(string([]rune(line)[:min(pos, len([]rune(line)))]))
+
+	r := complete.Complete(line, bytePos)
+	if len(r.Candidates) == 0 {
+		m.comps = nil
+		return m, nil
+	}
+
+	word := line[r.Start:r.End]
+	insert := r.Candidates[0]
+	if len(r.Candidates) > 1 {
+		insert = complete.CommonPrefix(r.Candidates)
+	}
+
+	// 進めないなら一覧を見せる。bash と同じく、一度目の Tab で進めるところまで進め、
+	// それ以上進まない二度目の Tab で一覧を出す。
+	if insert == word || insert == "" {
+		m.comps = r.Candidates
+		return m, nil
+	}
+
+	// 1件に決まったときだけ空白を足して次の語へ進ませる。
+	// ディレクトリは末尾が / なので、そのまま潜れるように空白は足さない。
+	if len(r.Candidates) == 1 && !strings.HasSuffix(insert, "/") {
+		insert += " "
+	}
+	m.comps = nil
+	newLine := line[:r.Start] + insert + line[r.End:]
+	m.input.SetValue(newLine)
+	m.input.SetCursor(len([]rune(line[:r.Start] + insert)))
+	return m, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

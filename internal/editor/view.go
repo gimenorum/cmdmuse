@@ -47,6 +47,9 @@ func (m Model) View() string {
 	if m.loading {
 		b.WriteString("\n" + stDim.Render("  … "+m.loadLabel))
 	}
+	if len(m.comps) > 0 {
+		b.WriteString("\n" + m.viewCompletions(w))
+	}
 	if len(m.cands) > 0 {
 		b.WriteString("\n" + m.viewCandidates(w))
 		b.WriteString("\n" + m.viewDetail(w))
@@ -127,6 +130,49 @@ func (m Model) viewDetail(w int) string {
 		b.WriteString(stDim.Render("  解説を生成中…"))
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// viewCompletions は Tab で決まりきらなかった候補を並べる。
+// 端末を埋め尽くさないよう件数を絞り、残りは数だけ伝える。
+func (m Model) viewCompletions(w int) string {
+	const maxShown = 24
+	shown := m.comps
+	rest := 0
+	if len(shown) > maxShown {
+		rest = len(shown) - maxShown
+		shown = shown[:maxShown]
+	}
+
+	colW := 0
+	for _, c := range shown {
+		if n := lipgloss.Width(c); n > colW {
+			colW = n
+		}
+	}
+	colW += 2
+	cols := max(1, (w-2)/colW)
+
+	var b strings.Builder
+	for i, c := range shown {
+		if i > 0 && i%cols == 0 {
+			b.WriteString("\n")
+		}
+		if i%cols == 0 {
+			b.WriteString("  ")
+		}
+		b.WriteString(stDim.Render(c + strings.Repeat(" ", colW-lipgloss.Width(c))))
+	}
+	if rest > 0 {
+		b.WriteString(stFaint.Render(fmt.Sprintf("\n  ...他 %d 件", rest)))
+	}
+	return strings.TrimRight(b.String(), " ")
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (m Model) viewHelp() string {
