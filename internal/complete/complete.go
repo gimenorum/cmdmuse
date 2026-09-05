@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Result は補完の結果。
@@ -81,6 +82,45 @@ func isCommandPosition(line string, start int) bool {
 	return true
 }
 
+// pathCache は PATH 上の実行可能ファイル名。
+// 打鍵ごとに提案を出すので、PATH 全体の走査は一度きりにする。
+var pathCache struct {
+	once  sync.Once
+	names []string
+}
+
+// InvalidatePathCache は PATH の走査結果を捨てる。
+// セッション中にコマンドを入れた場合に呼ぶ。
+func InvalidatePathCache() {
+	pathCache.once = sync.Once{}
+	pathCache.names = nil
+}
+
+func executables() []string {
+	pathCache.once.Do(func() {
+		seen := map[string]bool{}
+		for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+			if dir == "" {
+				continue
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				name := e.Name()
+				if seen[name] || e.IsDir() || !executable(dir, e) {
+					continue
+				}
+				seen[name] = true
+				pathCache.names = append(pathCache.names, name)
+			}
+		}
+		sort.Strings(pathCache.names)
+	})
+	return pathCache.names
+}
+
 // commands は PATH 上の実行可能ファイルとシェル組み込みから候補を集める。
 func commands(prefix string) []string {
 	seen := map[string]bool{}
@@ -92,23 +132,8 @@ func commands(prefix string) []string {
 			out = append(out, b)
 		}
 	}
-
-	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
-		if dir == "" {
-			continue
-		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			name := e.Name()
-			if !strings.HasPrefix(name, prefix) || seen[name] {
-				continue
-			}
-			if e.IsDir() || !executable(dir, e) {
-				continue
-			}
+	for _, name := range executables() {
+		if strings.HasPrefix(name, prefix) && !seen[name] {
 			seen[name] = true
 			out = append(out, name)
 		}
